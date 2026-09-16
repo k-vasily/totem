@@ -182,6 +182,20 @@ export const LiftTemplateSaveOut = withPreview(z.object({
   exercise_count: z.number().int(),
 }));
 
+export const LiftLinkCardioOut = withPreview(z.object({
+  linked: z.literal(true),
+  activity_id: z.string(),
+  activity_type: z.string().nullable(),
+  template_id: z.number().int(),
+  weightlifting_workout_id: z.string().nullable(),
+  exercise_count: z.number().int(),
+  set_count: z.number().int(),
+  total_volume_kg: z.number().nullable(),
+  msk_intensity_percent: z.number().nullable(),
+  scaled_msk_strain_score: z.number().nullable(),
+  verified: z.boolean(),
+}));
+
 export const LiftCustomExerciseOut = withPreview(z.object({
   created: z.literal(true),
   exercise_id: z.string(),

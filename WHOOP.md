@@ -1972,7 +1972,7 @@ It is a **two-call sequence**, mirroring the iOS app:
 }
 ```
 
-Not yet wrapped by the MCP. Independently captured from the iOS app (mitmproxy); account-specific IDs above are templated as `{activityId}` / `{userId}` / `{templateId}` / `{uuid}`.
+Wrapped as `whoop_lift_link_cardio` (implemented from this capture; not yet exercised against a live account). Independently captured from the iOS app (mitmproxy); account-specific IDs above are templated as `{activityId}` / `{userId}` / `{templateId}` / `{uuid}`.
 
 The MCP exposes `whoop_lift_prs, whoop_lift_exercise, whoop_lift_progression, whoop_lift_history, whoop_lift_library, whoop_lift_catalog, whoop_lift_log, whoop_lift_template_save, whoop_lift_custom_exercise`.
 

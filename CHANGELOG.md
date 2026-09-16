@@ -4,6 +4,21 @@ All notable changes to this project. Format roughly follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+> **LOCAL PATCH — hub-vendored, not yet upstream.** Everything under this heading was written on `agentos-hub` (`/var/lib/agent-os/whoop-strength-mcp`) on top of upstream [`thebriangao/totem`](https://github.com/thebriangao/totem) v1.5.0. It is **not** in any upstream release, so a plain `totem update` / upstream pull can silently drop it — re-apply or push these commits upstream before updating. Touched files: `src/tools/v2/lift_link_cardio.ts`, `src/tools/register.ts`, `src/lib/exercise_lookup.ts`, `src/whoop/build_lift_body.ts`, `src/schemas/strength.ts`, `tests/tools/lift_link_cardio.test.ts`, `tests/lib/exercise_lookup.test.ts`.
+
+### Added
+
+- **`whoop_lift_link_cardio`** — WRITE tool that attaches set-by-set strength data to an **existing** activity, i.e. the app's "Calculate Muscular Load" (`LINK_MSK_WORKOUT`) option on a strap-tracked activity. Unlike `whoop_lift_log` (which *creates* a new Strength Trainer activity), this leaves the activity in place so it carries both its HR/cardio strain and the computed Muscular Load; afterwards it reports as `weightlifting_msk`. Runs the app's documented two-call sequence — `POST /weightlifting-service/v3/workout-template` for the `workout_template_key`, then `POST /weightlifting-service/v2/weightlifting-workout/link-cardio-workout` with that key, the inline template and the target `activity_id`. Sets use the link body's simpler shape (`{weight, number_of_reps}`, plus `time_in_seconds` for TIME-format exercises — no `during`, no client set UUIDs, no `strap_location`); `exercise_details` is still the full denormalized catalog object with non-empty `created_at`/`updated_at`. Previews unless `confirm:true`, reports WHOOP rejections as structured errors (distinguishing "template saved, nothing linked" from "template rejected"), and proves the write from the response's `workout_metadata` (`weightlifting_workout_id`, `total_effective_volume_kg`, `scaled_msk_strain_score`) via a `verified` flag. Output validated by `LiftLinkCardioOut`.
+- **Conversational exercise resolution** (`resolveExerciseOrCandidates` in `src/lib/exercise_lookup.ts`) — resolves an exercise from an everyday name ("seated row") against the 372-entry bundled catalog by requiring every input word to appear in the entry's name or ID. It never guesses: an ambiguous input ("bench press") comes back as a capped candidate list that the tool surfaces as an actionable error, and an unmatched input is reported as unknown. The strict `resolveOfficialExercise` (exact ID / exact name) is unchanged, so existing tools keep their behaviour.
+
+### Changed
+
+- `src/whoop/build_lift_body.ts` factors the denormalized `exercise_details` object into one helper shared by the log/template builder and the new `buildLinkExerciseGroups` (simple set shape). `buildExerciseGroups` output is byte-for-byte unchanged.
+
+### Docs
+
+- `WHOOP.md` already documented the link endpoint as "Not yet wrapped by the MCP"; it is now wrapped. The implementation follows that documentation exactly — it has **not** been exercised against a live account from here (deliberately: a bad call would corrupt real workout history).
+
 ## [1.5.0] — 2026-08-28
 
 A reliability + efficiency pass, landed as a series of focused PRs (#15–#22, #24) reviewed individually. Tool count 49 → **55**; test suite → **278**.

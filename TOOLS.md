@@ -227,7 +227,7 @@ Local lookup over the bundled 372-exercise catalog. Zero network calls.
 - **Source:** Bundled `src/data/exercises.ts`
 - **Output:** `{total_in_catalog: 372, matched, truncated, exercises: [{exercise_id, name, muscle_groups, primary_muscle, equipment, movement_pattern, laterality}]}`
 
-### Strength writes (3)
+### Strength writes (4)
 
 #### `whoop_lift_log` ⚠️ WRITE
 Log a finished strength workout. Builds Whoop's full nested `workout_groups → workout_exercises → sets` body shape, denormalizing each exercise from the bundled catalog. Validates that every `exercise_id` exists in `EXERCISES_BY_ID` and fails early with a clear error if not.
@@ -244,6 +244,14 @@ Create or save-as a workout template (e.g. "Push Day", "Heavy Legs").
 - **Source:** `POST /weightlifting-service/v3/workout-template`
 - **Output:** `{created: true, template_id, name, exercise_count}` (or preview)
 - **Note:** No delete-template endpoint is wrapped (Whoop's iOS app doesn't expose one either via this URL). Created templates persist.
+
+#### `whoop_lift_link_cardio` ⚠️ WRITE
+Attach set-by-set strength data to an **existing** activity — the app's "Calculate Muscular Load" (`LINK_MSK_WORKOUT`) option on a strap-tracked activity. Use this instead of `whoop_lift_log` when the activity is already on the timeline: it keeps that one activity and gives it both its HR/cardio strain and the computed Muscular Load (afterwards it reports as `weightlifting_msk`). Exercises may be passed by ID, exact catalog name, or an everyday name ("seated row") — an ambiguous name comes back as candidates instead of a guess.
+
+- **Input:** `{activity_id: string, name?: string, exercises: [{exercise_id?, exercise?, sets: [{reps, weight?, time_seconds?}]}], rpe?: number, confirm?: boolean}`
+- **Source:** `POST /weightlifting-service/v3/workout-template`, then `POST /weightlifting-service/v2/weightlifting-workout/link-cardio-workout`
+- **Output:** `{linked: true, activity_id, activity_type, template_id, weightlifting_workout_id, exercise_count, set_count, total_volume_kg, msk_intensity_percent, scaled_msk_strain_score, verified}` (or preview)
+- **Quirks:** Two calls — the template POST returns the `workout_template_key` the link call needs as both `template_id` and `template.workout_template_key`. Sets are simpler here than in `whoop_lift_log` (`{weight, number_of_reps}`, plus `time_in_seconds` for TIME-format exercises): Whoop derives the workout window from the linked activity, so no `during`, set UUIDs or `strap_location`. `exercise_details.created_at`/`updated_at` must still be non-empty. `verified` is true only when the response's `workout_metadata` comes back with a `weightlifting_workout_id` for the requested activity. If the link call fails after the template was saved, the error says so explicitly.
 
 #### `whoop_lift_custom_exercise` ⚠️ WRITE
 Create a custom exercise based on an existing official one. Use this when you want to log a variant Whoop doesn't have (e.g. "Spoto Press" based on "Bench Press").

@@ -44,6 +44,7 @@ import { registerLiftCatalog } from "./v2/lift_catalog.js";
 import { registerLiftLog } from "./v2/lift_log.js";
 import { registerLiftTemplateSave } from "./v2/lift_template_save.js";
 import { registerLiftCustomExercise } from "./v2/lift_custom_exercise.js";
+import { registerLiftLinkCardio } from "./v2/lift_link_cardio.js";
 // Journal
 import { registerJournal } from "./v2/journal.js";
 import { registerJournalCatalog } from "./v2/journal_catalog.js";
@@ -121,6 +122,7 @@ export function registerTools(server: McpServer, client: WhoopClient): void {
   registerLiftLog(server, client);
   registerLiftTemplateSave(server, client);
   registerLiftCustomExercise(server, client);
+  registerLiftLinkCardio(server, client);
   registerJournalLog(server, client);
   registerJournalAutopop(server, client);
   registerCycleLog(server, client);
