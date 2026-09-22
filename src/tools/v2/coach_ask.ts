@@ -4,31 +4,47 @@ import type { WhoopClient } from "../../whoop/client.js";
 import { CoachAskOut } from "../../schemas/coach.js";
 import { preview } from "../../whoop/write_safety.js";
 import { jsonOut } from "../../whoop/json_out.js";
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
+import { WhoopApiError } from "../../whoop/errors.js";
 
 const TERMINAL_STATUSES = new Set(["COMPLETE", "COMPLETED", "DONE", "FINISHED"]);
 
+/**
+ * Coach v6.0 streams one reply as MANY `MARKDOWN_CHAT_TEXT` items spread over
+ * SEVERAL assistant messages (see WHOOP.md → Coach). Returning the first item
+ * (what we did pre-v6.0) truncates the answer to its opening clause, so the
+ * whole assistant side of the turn is concatenated in wire order. The user's
+ * own message is echoed back as `role: "user"` and must stay out.
+ */
 function extractCoachText(msgs: unknown[]): string | null {
+  const parts: string[] = [];
   for (const m of msgs) {
     if (typeof m !== "object" || m === null) continue;
     const msg = m as Record<string, unknown>;
-    if (msg.role && msg.role !== "assistant") continue;
-    if (typeof msg.content === "string") return msg.content;
+    if (msg.role !== "assistant") continue;
+    // Legacy (pre-v6.0) flat shape.
+    if (typeof msg.content === "string") {
+      parts.push(msg.content);
+      continue;
+    }
     if (!Array.isArray(msg.items)) continue;
     for (const item of msg.items) {
       if (typeof item !== "object" || item === null) continue;
       const itemContent = (item as Record<string, unknown>).content;
       if (typeof itemContent !== "object" || itemContent === null) continue;
       const text = (itemContent as Record<string, unknown>).text;
-      if (typeof text === "string") return text;
+      if (typeof text === "string") parts.push(text);
     }
   }
-  return null;
+  if (parts.length === 0) return null;
+  const joined = parts.join("");
+  return joined.trim() === "" ? null : joined;
 }
 
 export async function pollCoachTurn(
   client: WhoopClient,
-  conversationId: string,
+  /** Chat-session key in the URL. Coach v6.0 keys on the FINGERPRINT, not the conversation UUID. */
+  sessionKey: string,
   turnId: string,
   options: {
     timeoutMs?: number;
@@ -50,7 +66,7 @@ export async function pollCoachTurn(
     await sleep(Math.min(nextDelayMs(), Math.max(0, deadline - now())));
     if (now() >= deadline) break;
     const response = await client.get<Record<string, unknown>>(
-      `/ai-conversation-bff/v1/conversation/${conversationId}/turn/${turnId}`,
+      `/ai-conversation-bff/v1/conversation/${encodeURIComponent(sessionKey)}/turn/${turnId}`,
     );
     polled++;
     status = typeof response.turn_status === "string" ? response.turn_status.toUpperCase() : status;
@@ -64,6 +80,41 @@ export async function pollCoachTurn(
     }
   }
   return { responseText, status, polled, timedOut: true };
+}
+
+/**
+ * Whoop answers 409 while the conversation's opening turn is still being
+ * generated — conversation creation returns turn 0 already ACTIVE, so the very
+ * next POST races it. Retry briefly instead of surfacing the conflict.
+ */
+export async function postCoachTurn(
+  client: WhoopClient,
+  fingerprint: string,
+  message: string,
+  options: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<{ id?: string; turn_id?: string }> {
+  const attempts = options.attempts ?? 6;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const path = `/ai-conversation-bff/v1/conversation/${encodeURIComponent(fingerprint)}/turn`;
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await client.post<{ id?: string; turn_id?: string }>(path, {
+        role: "user",
+        content: message,
+        is_suggestion: false,
+        tracking_capabilities: {
+          is_dismiss_tracking_enabled: false,
+          is_seen_tracking_enabled: true,
+        },
+      });
+    } catch (err) {
+      if (!(err instanceof WhoopApiError) || err.status !== 409) throw err;
+      last = err;
+      await sleep(1_200 * (i + 1));
+    }
+  }
+  throw last;
 }
 
 export function registerCoachAsk(server: McpServer, client: WhoopClient): void {
@@ -93,6 +144,13 @@ export function registerCoachAsk(server: McpServer, client: WhoopClient): void {
           ],
         };
       }
+      // Coach v6.0 keys the chat session on the FINGERPRINT we choose, not on
+      // the conversation UUID it returns: every /conversation/{key}/... route
+      // resolves {key} as a fingerprint ("Chat session not found with given
+      // fingerprint: <uuid>" was the 404 that broke this tool). A unique
+      // suffix keeps each ask in its own session instead of colliding with
+      // earlier asks made the same day.
+      const fingerprint = `CHAT_WITH_AGENT${context}_${new Date().toISOString().slice(0, 10)}_${randomUUID().slice(0, 8)}`;
       // Conversation creation response: { metadata: { id, ... }, turns: [...], tag }
       const conv = await client.post<{
         metadata?: { id?: string };
@@ -100,7 +158,7 @@ export function registerCoachAsk(server: McpServer, client: WhoopClient): void {
         id?: string;
       }>("/ai-conversation-bff/v1/conversation", {
         context,
-        fingerprint: `CHAT_WITH_AGENT${context}_${new Date().toISOString().slice(0, 10)}`,
+        fingerprint,
         source_type: "CHAT_WITH_AGENT",
         chat_entrypoint_experience: "STANDARD",
         tracking_capabilities: {
@@ -117,18 +175,7 @@ export function registerCoachAsk(server: McpServer, client: WhoopClient): void {
       }
 
       // Turn response: { id, turn_status, messages, turn_number, feedback }
-      const turn = await client.post<{ id?: string; turn_id?: string }>(
-        `/ai-conversation-bff/v1/conversation/${conversationId}/turn`,
-        {
-          role: "user",
-          content: message,
-          is_suggestion: false,
-          tracking_capabilities: {
-            is_dismiss_tracking_enabled: false,
-            is_seen_tracking_enabled: true,
-          },
-        },
-      );
+      const turn = await postCoachTurn(client, fingerprint, message);
       const turnId = turn.id ?? turn.turn_id ?? "";
       if (!turnId) {
         return {
@@ -147,9 +194,10 @@ export function registerCoachAsk(server: McpServer, client: WhoopClient): void {
       // stop only once the turn is terminal (server says it's done) or the text
       // has stopped growing for two polls (the stream has settled). The 30s cap
       // is the backstop.
-      const { responseText, status, polled, timedOut } = await pollCoachTurn(client, conversationId, turnId);
+      const { responseText, status, polled, timedOut } = await pollCoachTurn(client, fingerprint, turnId);
       const out = CoachAskOut.parse({
         conversation_id: conversationId,
+        fingerprint,
         turn_id: turnId,
         response_text: responseText,
         turn_status: status,
