@@ -6,7 +6,13 @@ export function projectLibraryList(raw: unknown): LiftLibraryOutT {
   const my = asArray(root.my_workouts_list)
     .map((w) => {
       if (!isObject(w)) return null;
-      const tid = asNumber(w.template_id ?? w.id);
+      // /v3/workout-library отдаёт пользовательские шаблоны с ключом
+      // workout_template_key (НЕ template_id/id, как у whoop_workouts_list).
+      // Пока его тут не было, my_workouts всегда приходил пустым: библиотека
+      // выглядела чистой при 18 живых шаблонах — поэтому дедуп по имени в
+      // whoop-template-push.sh не срабатывал, а verify-after-write объявлял
+      // успешную запись провалом.
+      const tid = asNumber(w.workout_template_key ?? w.template_id ?? w.id);
       if (tid === null) return null;
       return {
         template_id: tid,
