@@ -10,6 +10,12 @@ import {
 export interface WhoopClientConfig {
   /** Async function returning a fresh bearer token. Called before each request. */
   getToken: () => Promise<string>;
+  /**
+   * Called once when WHOOP answers 401 to `rejectedToken` (WHOOP can revoke an
+   * access token before its `exp`). Return a fresh token to retry the request
+   * once; return the same token to give up. Absent = no retry.
+   */
+  onUnauthorized?: (rejectedToken: string) => Promise<string>;
   /** Injectable clock for deterministic cache tests. */
   now?: () => number;
 }
@@ -250,7 +256,40 @@ export class WhoopClient {
       url.searchParams.set(k, String(v));
     }
 
-    const token = await this.config.getToken();
+    let token = await this.config.getToken();
+    let response = await this.send(method, url, token, body);
+    if (response.status === 401 && this.config.onUnauthorized) {
+      const fresh = await this.config.onUnauthorized(token);
+      if (fresh && fresh !== token) {
+        token = fresh;
+        response = await this.send(method, url, token, body);
+      }
+    }
+
+    if (response.status === 401) {
+      throw new WhoopAuthExpiredError();
+    }
+    if (response.status >= 500) {
+      throw new WhoopServerError(response.status, path);
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      let description: string | undefined;
+      try {
+        const parsed = JSON.parse(text) as { error_description?: string; error?: string };
+        description = parsed.error_description ?? parsed.error;
+      } catch {
+        // body not JSON
+      }
+      throw new WhoopApiError(response.status, path, text, description);
+    }
+
+    const result = response.status === 204 ? undefined as T : (await response.json()) as T;
+    if (method !== "GET") this.cache.invalidate(writeInvalidationTags(path));
+    return result;
+  }
+
+  private async send(method: string, url: URL, token: string, body: unknown): Promise<Response> {
     // Start from the iOS app's identity headers (user-agent, x-whoop-*, locale,
     // accept, priority — see device.ts), then layer auth and, for writes, the
     // body content-type on top so they always win. `accept-encoding` is left
@@ -276,33 +315,10 @@ export class WhoopClient {
     };
     if (bodyString !== undefined) init.body = bodyString;
 
-    let response: Response;
     try {
-      response = await fetch(url.toString(), init);
+      return await fetch(url.toString(), init);
     } finally {
       clearTimeout(timeout);
     }
-
-    if (response.status === 401) {
-      throw new WhoopAuthExpiredError();
-    }
-    if (response.status >= 500) {
-      throw new WhoopServerError(response.status, path);
-    }
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      let description: string | undefined;
-      try {
-        const parsed = JSON.parse(text) as { error_description?: string; error?: string };
-        description = parsed.error_description ?? parsed.error;
-      } catch {
-        // body not JSON
-      }
-      throw new WhoopApiError(response.status, path, text, description);
-    }
-
-    const result = response.status === 204 ? undefined as T : (await response.json()) as T;
-    if (method !== "GET") this.cache.invalidate(writeInvalidationTags(path));
-    return result;
   }
 }

@@ -1,9 +1,13 @@
 // Holds the current access token + refresh token, auto-refreshes via Cognito
-// when the access token is within `refreshSkewSeconds` of expiry. Writes
+// when the access token is within `refreshSkewSeconds` of expiry, and on
+// demand (`forceRefresh`) when WHOOP answers 401 before that expiry. Writes
 // rotated tokens to an injected TokenStore so server restarts pick up fresh
 // state without re-bootstrapping.
 import { decodeJwtExp, refreshCognitoSession } from "./cognito.js";
 import { EnvFileTokenStore, type TokenStore } from "./token_store.js";
+
+/** Minimum spacing between two 401-driven refreshes in one process. */
+const FORCED_REFRESH_COOLDOWN_MS = 30_000;
 
 export interface TokenManagerConfig {
   email: string;
@@ -28,6 +32,7 @@ export class TokenManager {
   private skewMs: number;
   private store: TokenStore;
   private refreshing: Promise<void> | null = null;
+  private lastRefreshAt = 0;
 
   constructor(config: TokenManagerConfig) {
     this.email = config.email;
@@ -46,14 +51,62 @@ export class TokenManager {
 
   async getToken(): Promise<string> {
     if (this.isFresh()) return this.accessToken;
+    return this.singleFlight(null);
+  }
+
+  /**
+   * WHOOP rejected `rejectedToken` with 401 even though its `exp` says it is
+   * still valid (server-side revocation happens). Refresh once and return the
+   * new token. Returns `rejectedToken` unchanged when no new token could be
+   * obtained without hammering Cognito — the caller then surfaces the 401.
+   */
+  async forceRefresh(rejectedToken: string): Promise<string> {
+    // Another request in this process already replaced it.
+    if (this.accessToken !== rejectedToken) return this.accessToken;
+    return this.singleFlight(rejectedToken);
+  }
+
+  private async singleFlight(rejected: string | null): Promise<string> {
     // Single-flight: if a refresh is already running, wait on it
     if (!this.refreshing) {
-      this.refreshing = this.doRefresh().finally(() => {
+      this.refreshing = this.refreshShared(rejected).finally(() => {
         this.refreshing = null;
       });
     }
     await this.refreshing;
     return this.accessToken;
+  }
+
+  /**
+   * Refresh under the store's cross-process lock. Several processes share one
+   * token file (the long-lived MCP server and per-tick headless callers); if a
+   * sibling refreshed while we waited for the lock, adopt its tokens instead of
+   * spending the refresh token a second time.
+   */
+  private async refreshShared(rejected: string | null): Promise<void> {
+    const run = async (): Promise<void> => {
+      const disk = this.store.load?.() ?? null;
+      if (disk) {
+        if (disk.accessToken !== this.accessToken && disk.accessToken !== rejected) {
+          const exp = decodeJwtExp(disk.accessToken) * 1000;
+          if (Date.now() < exp - this.skewMs) {
+            this.accessToken = disk.accessToken;
+            this.refreshToken = disk.refreshToken;
+            this.expiresAt = exp;
+            return;
+          }
+        }
+        // The file holds the newest refresh token (it may have been rotated
+        // by a sibling); spend that one, not our possibly stale copy.
+        this.refreshToken = disk.refreshToken;
+      }
+      // A token we minted moments ago being rejected again is not an expiry
+      // problem; refreshing in a loop would only burn Cognito calls.
+      if (rejected !== null && Date.now() - this.lastRefreshAt < FORCED_REFRESH_COOLDOWN_MS) return;
+      await this.doRefresh();
+    };
+    if (this.store.withLock) await this.store.withLock(run);
+    else await run();
   }
 
   private isFresh(): boolean {
@@ -71,6 +124,7 @@ export class TokenManager {
       console.error("[totem] Cognito rotated the refresh token — persisting the new one.");
     }
     this.expiresAt = next.expiresAt;
+    this.lastRefreshAt = Date.now();
     try {
       this.store.save({ accessToken: this.accessToken, refreshToken: this.refreshToken });
     } catch (error) {
